@@ -110,9 +110,7 @@
 #define OTP_BKP_BASE            0x4E060800U // OTP_BKP
    #define OTP_BKP_SIZE                    0x800U
 #define BPU_BASE                0xE0002000U // BPU
-#define NVIC_BASE               0xE000E000U // NVIC
 #define SYSTICK_BASE            0xE000E010U // SYSTICK
-#define SCB_BASE                0xE000ED00U // SCB
 #define DCB_BASE                0xE000ED30U // DCB
 #define SCSCS_BASE              0xE000EFC0U // SCSCS
 #define CPU_ROM_TABLE_BASE      0xE00FF000U // CPU_ROM_TABLE
