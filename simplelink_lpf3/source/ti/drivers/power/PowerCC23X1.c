@@ -74,7 +74,6 @@
 #include DeviceFamily_constructPath(driverlib/systick.h)
 #include DeviceFamily_constructPath(driverlib/systimer.h)
 #include DeviceFamily_constructPath(driverlib/ull.h)
-#include DeviceFamily_constructPath(cmsis/core/cmsis_compiler.h)
 
 /* Missing driverlib defines.
  * TODO: Use driverlib defines when/if they exist or verify values.
