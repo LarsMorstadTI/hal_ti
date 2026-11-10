@@ -49,6 +49,11 @@
 
 #include <ti/log/Log.h>
 
+/* Needed for the power driver to be aware of Zephyr power constraints */
+#ifdef __ZEPHYR__
+    #include <zephyr/pm/policy.h>
+#endif
+
 #include <ti/devices/DeviceFamily.h>
 #include DeviceFamily_constructPath(inc/hw_types.h)
 #include DeviceFamily_constructPath(inc/hw_memmap.h)
@@ -116,7 +121,9 @@ typedef enum
 /* Forward declarations */
 int_fast16_t PowerCC23X1_notify(uint_fast16_t eventType);
 static void PowerCC23X1_oscillatorISR(uintptr_t arg);
+#ifndef __ZEPHYR__
 static void PowerCC23X1_rtcISR(uintptr_t arg);
+#endif
 static void PowerCC23X1_enterStandby(void);
 static void PowerCC23X1_setDependencyCount(Power_Resource resourceId, uint8_t count);
 bool PowerCC23X1_isValidResourceId(Power_Resource resourceId);
@@ -312,8 +319,10 @@ static ClockP_Struct hfxtAmpCompClock;
 
 /* Non-static Globals */
 
+#ifndef __ZEPHYR__
 /* Interrupt for ClockP and Power policy */
 HwiP_Struct clockHwi;
+#endif
 
 /* ****************** Power APIs ******************** */
 
@@ -322,9 +331,23 @@ HwiP_Struct clockHwi;
  */
 int_fast16_t Power_init(void)
 {
+#ifdef __ZEPHYR__
+    /* When using MCUBoot with Zephyr, the system is already initialized before
+     * jumping to the application. When the HFXT is started the oscillatorISR
+     * gets triggered, which cancels the timer and sets the callback to NULL
+     * before ClockP_start() is called. As a result, ClockP dereferences a NULL
+     * pointer when the timer expires and then we hit a fault. To fix, this
+     * function is placed in a critical section.
+     */
+    uintptr_t hwiKey = HwiP_disable();
+#endif
+
     /* If this function has already been called, just return */
     if (isInitialized)
     {
+#ifdef __ZEPHYR__
+        HwiP_restore(hwiKey);
+#endif
         return Power_SOK;
     }
 
@@ -356,12 +379,19 @@ int_fast16_t Power_init(void)
 
     HwiP_enableInterrupt(INT_CPUIRQ3);
 
+#ifndef __ZEPHYR__
     /* Construct the ClockP hwi responsible for timing service events.
      * This Hwi is time multiplexed between the SysTimer and the RTC for use
      * by the ClockP and Power policy respectively.
      * Since there is no dedicated RTC or SysTimer interrupt line, we need to
      * mux one of the configurable lines to the CKM.
      * CPUIRQ16 is dedicated to this purpose.
+     *
+     * In Zephyr, ClockP takes this IRQ before this function is called
+     * which mean that this muxing will prevent the timer interrupt, causing
+     * the kernel not to tick. The RTC interrupt is also left masked, as the
+     * RTC is shared with Zephyr drivers and is only unmasked by the power
+     * driver when it is needed to wake the SoC from standby.
      */
     HwiP_construct(&clockHwi, INT_CPUIRQ16, PowerCC23X1_rtcISR, NULL);
 
@@ -369,6 +399,7 @@ int_fast16_t Power_init(void)
      * purposes.
      */
     HWREG(RTC_BASE + RTC_O_IMSET) = RTC_IMSET_EV0_SET;
+#endif
 
     /* Configure RTC to halt when CPU stopped during debug */
     HWREG(RTC_BASE + RTC_O_EMU) = RTC_EMU_HALT_STOP;
@@ -420,6 +451,10 @@ int_fast16_t Power_init(void)
 
     /* Enable RTC as a standby wakeup source */
     HWREG(EVTULL_BASE + EVTULL_O_WKUPMASK) = EVTULL_WKUPMASK_AON_RTC_COMB_M;
+
+#ifdef __ZEPHYR__
+    HwiP_restore(hwiKey);
+#endif
 
     return Power_SOK;
 }
@@ -632,6 +667,21 @@ int_fast16_t Power_setConstraint(uint_fast16_t constraintId)
 
     DebugP_assert(constraintId < PowerCC23X1_NUMCONSTRAINTS);
 
+#ifdef __ZEPHYR__
+    /* Forward constraint set to Zephyr */
+    switch (constraintId)
+    {
+        case PowerLPF3_DISALLOW_STANDBY:
+            pm_policy_state_lock_get(PM_STATE_STANDBY, PM_ALL_SUBSTATES);
+            break;
+        case PowerLPF3_DISALLOW_IDLE:
+            pm_policy_state_lock_get(PM_STATE_RUNTIME_IDLE, PM_ALL_SUBSTATES);
+            break;
+        default:
+            break;
+    }
+#endif
+
     key = HwiP_disable();
 
     /* Set the specified constraint in the constraintMask for faster access */
@@ -658,6 +708,21 @@ int_fast16_t Power_releaseConstraint(uint_fast16_t constraintId)
     key = HwiP_disable();
 
     DebugP_assert(constraintCounts[constraintId] != 0U);
+
+#ifdef __ZEPHYR__
+    /* Forward constraint release to Zephyr */
+    switch (constraintId)
+    {
+        case PowerLPF3_DISALLOW_STANDBY:
+            pm_policy_state_lock_put(PM_STATE_STANDBY, PM_ALL_SUBSTATES);
+            break;
+        case PowerLPF3_DISALLOW_IDLE:
+            pm_policy_state_lock_put(PM_STATE_RUNTIME_IDLE, PM_ALL_SUBSTATES);
+            break;
+        default:
+            break;
+    }
+#endif
 
     constraintCounts[constraintId]--;
 
@@ -1646,6 +1711,7 @@ static void PowerCC23X1_oscillatorISR(uintptr_t arg)
     }
 }
 
+#ifndef __ZEPHYR__
 /*
  *  ======== PowerCC23X1_rtcISR ========
  */
@@ -1657,6 +1723,7 @@ static void PowerCC23X1_rtcISR(uintptr_t arg)
      */
     HWREG(RTC_BASE + RTC_O_ICLR) = HWREG(RTC_BASE + RTC_O_MIS);
 }
+#endif
 
 /*
  *  ======== PowerCC23X1_startHFXT ========
@@ -2444,6 +2511,15 @@ int_fast16_t PowerLPF3_sleep(uint32_t nextEventTimeUs)
 {
     uint32_t sysTimerIMASK;
     uint32_t sysTimerARMSET;
+#ifdef __ZEPHYR__
+    /* The RTC channel 0 compare value, armed state and interrupt mask may be
+     * owned by a Zephyr RTC or counter driver. Save them before the power
+     * driver uses channel 0 for the standby wakeup, and restore them after.
+     */
+    uint32_t rtcCH0CC8U;
+    uint32_t rtcARMSET;
+    uint32_t rtcIMASK;
+#endif
     uint32_t sysTimerTimeouts[SYSTIMER_CHANNEL_COUNT];
     int_fast16_t result = Power_SOK;
 
@@ -2458,6 +2534,20 @@ int_fast16_t PowerLPF3_sleep(uint32_t nextEventTimeUs)
 
     /* Store SysTimer timeouts */
     memcpy(sysTimerTimeouts, (void *)(SYSTIM_BASE + SYSTIM_O_CH0CCSR), sizeof(sysTimerTimeouts));
+
+#ifdef __ZEPHYR__
+    /* Read back current RTC compare value. */
+    rtcCH0CC8U = HWREG(RTC_BASE + RTC_O_CH0CC8U);
+
+    /* Read the armed state of the RTC. */
+    rtcARMSET = HWREG(RTC_BASE + RTC_O_ARMSET);
+
+    /* Read the interrupt mask of the RTC. */
+    rtcIMASK = HWREG(RTC_BASE + RTC_O_IMASK);
+
+    /* Interrupt must be unmasked as CPU requires RTC compare event to wakeup. */
+    HWREG(RTC_BASE + RTC_O_IMSET) = RTC_IMSET_EV0_SET;
+#endif
 
     /* Switch CPUIRQ16 in event fabric to RTC.
      * Since the CC23X1 only has limited interrupt lines, we need to switch the
@@ -2509,6 +2599,34 @@ int_fast16_t PowerLPF3_sleep(uint32_t nextEventTimeUs)
 
     /* Switch CPUIRQ16 in event fabric back to SysTimer */
     EVTSVTConfigureEvent(EVTSVT_SUB_CPUIRQ16, EVTSVT_PUB_SYSTIM0);
+
+#ifdef __ZEPHYR__
+    /* Restore RTC compare value. Writing into compare register
+     * automatically arms the RTC for compare events.
+     */
+    HWREG(RTC_BASE + RTC_O_CH0CC8U) = rtcCH0CC8U;
+
+    /* If RTC was not armed before sleep. */
+    if ((rtcARMSET & RTC_ARMSET_CH0_M) == RTC_ARMSET_CH0_NOEFF)
+    {
+        /* Disarm the RTC */
+        HWREG(RTC_BASE + RTC_O_ARMCLR) = RTC_ARMCLR_CH0_CLR;
+
+        /* Clear the RTC wakeup event */
+        HWREG(RTC_BASE + RTC_O_ICLR) = RTC_ICLR_EV0_CLR;
+    }
+
+    if ((rtcIMASK & RTC_IMASK_EV0_M) == RTC_IMASK_EV0_EN)
+    {
+        /* If interrupt was masked, enable the interrupt mask. */
+        HWREG(RTC_BASE + RTC_O_IMSET) = RTC_IMSET_EV0_SET;
+    }
+    else
+    {
+        /* If interrupt was unmasked, clear the interrupt mask. */
+        HWREG(RTC_BASE + RTC_O_IMCLR) = RTC_IMCLR_EV0_CLR;
+    }
+#endif
 
     /* When waking up from standby, the SysTimer may not have
      * synchronised with the RTC by now. Wait for SysTimer
