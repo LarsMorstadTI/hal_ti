@@ -38,6 +38,7 @@
 // Device-specific configuration file
 #include "cc23x0r5.h"
 
+#ifdef __ZEPHYR
 // Core-specific cmsis header file.
 // Use the CMSIS-Core provided by Zephyr (the cmsis_6 module) rather than the
 // copy bundled with hal_ti, so the core definitions match the Zephyr version in
@@ -45,5 +46,18 @@
 // angle-bracket include resolves through the cmsis_6 module include path, and
 // core_cm0plus.h pulls in the matching toolchain header via cmsis_compiler.h.
 #include <core_cm0plus.h>
+#else
+// Core-specific cmsis header file
+#include "core/core_cm0plus.h"
+
+// Toolchain-specific cmsis header files
+#if defined(__IAR_SYSTEMS_ICC__)
+#include "core/cmsis_iccarm.h"
+#elif defined(__GNUC__) || defined(__clang__)
+#include "core/cmsis_gcc.h"
+#else
+    #error "Unexpected toolchain used when importing cmsis headers"
+#endif
+#endif
 
 #endif // #ifndef __DEVICE_H__
