@@ -330,6 +330,12 @@ HwiP_Struct clockHwi;
  */
 int_fast16_t Power_init(void)
 {
+    /* If this function has already been called, just return */
+    if (isInitialized)
+    {
+        return Power_SOK;
+    }
+
 #ifdef __ZEPHYR__
     /* When using MCUBoot with Zephyr, the system is already initialized before
      * jumping to the application. When the HFXT is started the oscillatorISR
@@ -340,15 +346,6 @@ int_fast16_t Power_init(void)
      */
     uintptr_t hwiKey = HwiP_disable();
 #endif
-
-    /* If this function has already been called, just return */
-    if (isInitialized)
-    {
-#ifdef __ZEPHYR__
-        HwiP_restore(hwiKey);
-#endif
-        return Power_SOK;
-    }
 
     isInitialized = true;
 
@@ -388,17 +385,15 @@ int_fast16_t Power_init(void)
      *
      * In Zephyr, ClockP takes this IRQ before this function is called
      * which mean that this muxing will prevent the timer interrupt, causing
-     * the kernel not to tick. The RTC interrupt is also left masked, as the
-     * RTC is shared with Zephyr drivers and is only unmasked by the power
-     * driver when it is needed to wake the SoC from standby.
+     * the kernel not to tick.
      */
     HwiP_construct(&clockHwi, INT_CPUIRQ16, PowerCC23X1_rtcISR, NULL);
+#endif
 
     /* Use RTC channel 0 in compare mode. Channel 1 could be used for other
      * purposes.
      */
     HWREG(RTC_BASE + RTC_O_IMSET) = RTC_IMSET_EV0_SET;
-#endif
 
     /* Configure RTC to halt when CPU stopped during debug */
     HWREG(RTC_BASE + RTC_O_EMU) = RTC_EMU_HALT_STOP;
@@ -1710,10 +1705,10 @@ static void PowerCC23X1_oscillatorISR(uintptr_t arg)
     }
 }
 
-#ifndef __ZEPHYR__
 /*
  *  ======== PowerCC23X1_rtcISR ========
  */
+#ifndef __ZEPHYR__
 static void PowerCC23X1_rtcISR(uintptr_t arg)
 {
     /* We should never get here since we will just use the interrupt to wake
@@ -2599,7 +2594,6 @@ int_fast16_t PowerLPF3_sleep(uint32_t nextEventTimeUs)
     /* Switch CPUIRQ16 in event fabric back to SysTimer */
     EVTSVTConfigureEvent(EVTSVT_SUB_CPUIRQ16, EVTSVT_PUB_SYSTIM0);
 
-#ifdef __ZEPHYR__
     /* Restore RTC compare value. Writing into compare register
      * automatically arms the RTC for compare events.
      */
@@ -2625,7 +2619,6 @@ int_fast16_t PowerLPF3_sleep(uint32_t nextEventTimeUs)
         /* If interrupt was unmasked, clear the interrupt mask. */
         HWREG(RTC_BASE + RTC_O_IMCLR) = RTC_IMCLR_EV0_CLR;
     }
-#endif
 
     /* When waking up from standby, the SysTimer may not have
      * synchronised with the RTC by now. Wait for SysTimer
